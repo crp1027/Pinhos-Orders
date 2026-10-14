@@ -1,0 +1,12 @@
+{
+  // Pinho's Cake Orders — Cloudflare Worker settings.
+  // The database (D1) and picture storage (R2) are created automatically on the first deploy.
+  // The staff PIN is NOT stored here: add it in Cloudflare as a secret named STAFF_PIN.
+  "name": "pinhos-orders",
+  "main": "worker/index.js",
+  "compatibility_date": "2026-09-01",
+  "rules": [{ "type": "Text", "globs": ["**/*.html"], "fallthrough": true }],
+  "d1_databases": [{ "binding": "DB", "database_name": "pinhos-orders" }],
+  "r2_buckets": [{ "binding": "PICS", "bucket_name": "pinhos-pictures" }],
+  "observability": { "enabled": true }
+}
