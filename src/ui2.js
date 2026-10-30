@@ -454,7 +454,7 @@ function useReceiptPrint() {
   if (jobs && jobs.length) {
     const c = k => jobs.filter(j => j.status === k).length;
     const done = c('done'), errs = jobs.filter(j => j.status === 'error'), exp = c('expired'), unc = c('unconfirmed');
-    if (errs.length) { bad = true; msg = `The printer reported a problem: ${errs[0].code || 'unknown error'}. Check the paper and lid, then tap Reprint — or use regular paper.`; }
+    if (errs.length) { bad = true; const c0 = errs[0].code || 'unknown error'; msg = /^5/.test(c0) ? `The printer couldn’t read ${errs.length === 1 ? 'a receipt' : errs.length + ' receipts'} (${c0}). Use regular paper or the 80 mm PDF for ${errs.length === 1 ? 'it' : 'them'}, and tell Chris.` : `The printer reported a problem: ${c0}. Check the paper and lid, then tap Reprint — or use regular paper.`; }
     else if (exp) { bad = true; msg = `The printer didn’t pick up ${exp === 1 ? 'a receipt' : exp + ' receipts'} within 15 minutes. When it’s back online, tap Reprint — or use regular paper.`; }
     else if (unc) { bad = true; msg = `The printer took ${unc === 1 ? 'a receipt' : unc + ' receipts'} but never confirmed printing. Check whether ${unc === 1 ? 'it' : 'they'} came out.`; }
     else if (done === jobs.length) { finished = true; msg = `Printed ${done === 1 ? '1 receipt' : `all ${done} receipts`} ✓`; }

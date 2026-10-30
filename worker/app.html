@@ -2302,20 +2302,51 @@ async function receiptPngs(list, onProgress) {
       host.innerHTML = list[i].html.replace(/src="[^"]*" alt="" class="rlogo"|class="rlogo" src="[^"]*"/, `class="rlogo" src="${bwLogo()}"`);
       const el = host.firstElementChild; await waitImages(el);
       const c = await window.html2canvas(el, { scale: RC_SCALE, backgroundColor: '#ffffff', logging: false, width: RC_W, windowWidth: RC_W, scrollX: 0, scrollY: 0 });
-      out.push({ ...list[i], png: toMono(c), w: c.width, h: c.height });
+      out.push({ ...list[i], png: await toMono(c), w: c.width, h: c.height });
     }
   } finally { host.remove(); }
   return out;
 }
 /** Thermal paper prints black or nothing: turn anti-aliased grey into crisp black/white. */
-function toMono(c) {
+/** Thermal paper prints black or nothing. Threshold to pure black/white and encode a true 1-bit PNG:
+    the printer has to unpack the whole image in memory, and a full-color PNG of a long receipt (4 bytes per dot)
+    is too big for it (Star error 511 "Media Decoding Error"). 1-bit is 1/32 of that. */
+async function toMono(c) {
   const W = RC_DOTS, H = Math.round(c.height * RC_DOTS / c.width);
   const m = document.createElement('canvas'); m.width = W; m.height = H; const g = m.getContext('2d');
   g.fillStyle = '#fff'; g.fillRect(0, 0, W, H); g.drawImage(c, 0, 0, W, H);
-  const d = g.getImageData(0, 0, W, H); const a = d.data;
-  for (let i = 0; i < a.length; i += 4) { const v = (a[i] * 299 + a[i + 1] * 587 + a[i + 2] * 114) / 1000 < 165 ? 0 : 255; a[i] = a[i + 1] = a[i + 2] = v; a[i + 3] = 255; }
-  g.putImageData(d, 0, 0); return m.toDataURL('image/png');
+  const a = g.getImageData(0, 0, W, H).data;
+  const rowBytes = Math.ceil(W / 8); const raw = new Uint8Array((rowBytes + 1) * H);
+  for (let y = 0; y < H; y++) {
+    const o = y * (rowBytes + 1); raw[o] = 0;                    // filter: none
+    for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4; const white = (a[i] * 299 + a[i + 1] * 587 + a[i + 2] * 114) / 1000 >= 165;
+      if (white) raw[o + 1 + (x >> 3)] |= 0x80 >> (x & 7);         // 1 = white, 0 = black (grayscale, bit depth 1)
+    }
+  }
+  return pngDataUrl(await encode1bitPng(W, H, raw));
 }
+const _crcT = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+function crc32(bytes) { let c = 0xFFFFFFFF; for (let i = 0; i < bytes.length; i++) c = _crcT[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; }
+async function zlibDeflate(raw) {
+  if (typeof CompressionStream === 'function') {
+    try { const s = new Blob([raw]).stream().pipeThrough(new CompressionStream('deflate')); return new Uint8Array(await new Response(s).arrayBuffer()); } catch { }
+  }
+  // fallback: zlib "stored" blocks (no compression) — still small for 1-bit images
+  const blocks = []; let pos = 0; const out = [0x78, 0x01];
+  while (pos < raw.length || !blocks.length) { const len = Math.min(65535, raw.length - pos); const last = pos + len >= raw.length; out.push(last ? 1 : 0, len & 255, len >> 8, ~len & 255, (~len >> 8) & 255); for (let i = 0; i < len; i++) out.push(raw[pos + i]); pos += len; blocks.push(1); if (last) break; }
+  let s1 = 1, s2 = 0; for (let i = 0; i < raw.length; i++) { s1 = (s1 + raw[i]) % 65521; s2 = (s2 + s1) % 65521; }
+  const ad = ((s2 << 16) | s1) >>> 0; out.push(ad >>> 24, (ad >>> 16) & 255, (ad >>> 8) & 255, ad & 255);
+  return new Uint8Array(out);
+}
+async function encode1bitPng(W, H, raw) {
+  const chunk = (type, data) => { const out = new Uint8Array(12 + data.length); const dv = new DataView(out.buffer); dv.setUint32(0, data.length);
+    for (let i = 0; i < 4; i++) out[4 + i] = type.charCodeAt(i); out.set(data, 8); dv.setUint32(8 + data.length, crc32(out.subarray(4, 8 + data.length))); return out; };
+  const ihdr = new Uint8Array(13); const dv = new DataView(ihdr.buffer); dv.setUint32(0, W); dv.setUint32(4, H); ihdr.set([1, 0, 0, 0, 0], 8);   // bit depth 1, grayscale
+  const parts = [new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), chunk('IDAT', await zlibDeflate(raw)), chunk('IEND', new Uint8Array(0))];
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0)); let o = 0; for (const p of parts) { out.set(p, o); o += p.length; } return out;
+}
+function pngDataUrl(bytes) { let s = ''; for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000)); return 'data:image/png;base64,' + btoa(s); }
 /** Fallback when no receipt printer is connected: one 80 mm-wide PDF page per receipt. */
 async function receiptPdf(pngs) {
   await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js');
@@ -3366,7 +3397,7 @@ function useReceiptPrint() {
   if (jobs && jobs.length) {
     const c = k => jobs.filter(j => j.status === k).length;
     const done = c('done'), errs = jobs.filter(j => j.status === 'error'), exp = c('expired'), unc = c('unconfirmed');
-    if (errs.length) { bad = true; msg = `The printer reported a problem: ${errs[0].code || 'unknown error'}. Check the paper and lid, then tap Reprint — or use regular paper.`; }
+    if (errs.length) { bad = true; const c0 = errs[0].code || 'unknown error'; msg = /^5/.test(c0) ? `The printer couldn’t read ${errs.length === 1 ? 'a receipt' : errs.length + ' receipts'} (${c0}). Use regular paper or the 80 mm PDF for ${errs.length === 1 ? 'it' : 'them'}, and tell Chris.` : `The printer reported a problem: ${c0}. Check the paper and lid, then tap Reprint — or use regular paper.`; }
     else if (exp) { bad = true; msg = `The printer didn’t pick up ${exp === 1 ? 'a receipt' : exp + ' receipts'} within 15 minutes. When it’s back online, tap Reprint — or use regular paper.`; }
     else if (unc) { bad = true; msg = `The printer took ${unc === 1 ? 'a receipt' : unc + ' receipts'} but never confirmed printing. Check whether ${unc === 1 ? 'it' : 'they'} came out.`; }
     else if (done === jobs.length) { finished = true; msg = `Printed ${done === 1 ? '1 receipt' : `all ${done} receipts`} ✓`; }
