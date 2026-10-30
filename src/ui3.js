@@ -59,7 +59,7 @@ async function doSave(mode) {
       f.saved = true; closeDialog();
       toast(`Order #${f.num} ${wasDraft ? 'confirmed' : 'saved'} for ${fmtDateMed(f.pickupDate)} ${fmtTime(f.pickupTime)}.`);
       UI.tab = 'today'; UI.day = f.pickupDate; openDetail(f.id, f.items[0].id);
-      UI.review = { orderId: f.id, isNew: wasDraft, at: Date.now() };
+      UI.review = { orderId: f.id, isNew: wasDraft, auto: hasPrinter(), at: Date.now() };
     } else { closeDialog(); toast(`Draft #${f.num} saved. It is not in production lists until confirmed.`); }
   } catch (e) {
     console.error(e);
@@ -501,6 +501,7 @@ function OptionsScreen() {
   const demoCount = [...Store.orders.values()].filter(o => o.demo).length;
   useEffect(() => { Store.assets && Store.assets.list && Store.assets.list().then(r => setUsage(r.usage)).catch(() => { }); }, []);
   return html`<div class="screen options"><h1>Menu, prices & settings</h1>
+    ${window.__cloud && html`<${PrinterSettings} />`}
     <section class="sec"><h2>Backup</h2><div class="box2">
       <p>Download a spreadsheet of orders (customer, phone, pickup, cake details, inscription, prices, balance) so you can keep working from paper if the site is ever unavailable. Photos are not included.</p>
       <div class="inline"><button class="btn primary" onClick=${() => openDialog({ type: 'backup' })}><${Icon} n="list" />Download backup…</button><span class="muted small">Tip: download one every week and before busy weekends.</span></div></div></section>
@@ -535,4 +536,21 @@ function OptionsScreen() {
       <p>Slips print through a PDF: “Save PDF to print” creates a Letter-size file with four slips per page. Open it and print at Actual size / 100%.</p>
     </div></section>
   </div>`;
+}
+
+/* ---------- receipt printer settings (Cloudflare version) ---------- */
+function PrinterSettings() {
+  const [st, setSt] = useState(window.__printerInfo || null); const R = useReceiptPrint();
+  useEffect(() => { let live = true; const f = () => fetch('/api/printer', { credentials: 'same-origin' }).then(r => r.json()).then(x => { if (live) { setSt(x); window.__printerInfo = x; } }).catch(() => { }); f(); const t = setInterval(f, 8000); return () => { live = false; clearInterval(t); }; }, []);
+  const copy = async () => { try { await navigator.clipboard.writeText(st.serverUrl); toast('Server URL copied.'); } catch { toast('Select the address and copy it by hand.', 'bad'); } };
+  const test = () => R.run([{ kind: 'test', label: 'Test receipt', html: rcTest() }], []);
+  return html`<section class="sec"><h2>Receipt printer</h2><div class="box2">
+    ${!st ? html`<p class="muted">Checking…</p>` : !st.configured ? html`<p>${st.msg}</p>` : html`
+      <div class=${'pstat ' + (st.online ? 'on' : 'off')}><i></i><span>${st.msg}</span></div>
+      <div class="fld"><span>Server URL to enter on the printer (CloudPRNT)</span>
+        <div class="urlbox"><code>${st.serverUrl}</code><button class="btn sm" onClick=${copy}>Copy</button></div>
+        <small class="muted">Keep this address private: anyone who has it can send paper to your printer (they can’t see orders).</small></div>
+      <div class="inline"><button class="btn" disabled=${!!R.phase} onClick=${test}><${Icon} n="print" s=${18} />${R.phase ? 'Working…' : 'Print a test receipt'}</button></div>
+      <${PrintStatus} R=${R} />`}
+  </div></section>`;
 }

@@ -577,6 +577,10 @@ details.more[open]{display:flex;flex-direction:column;gap:10px}
 .slip.rcc .citem{border-top:1px solid #000;padding-top:4px} .slip.rcc .cih{font-size:13px} .slip.rcc .cid{font-size:11.5px}
 .slip.rcc .ctot{flex-wrap:wrap;gap:4px} .slip.rcc .ctot b{font-size:14px} .slip.rcc .cbal b{font-size:19px}
 .slip.rcc .cfoot{font-size:11px;margin-top:8px}
+.joblist{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-direction:column;gap:4px;font-size:.9rem}
+.joblist li{display:flex;justify-content:space-between;gap:10px;padding:4px 10px;border-radius:999px;background:var(--surface)}
+.joblist li b{white-space:nowrap} .joblist .js-done b{color:var(--good)} .joblist .js-error b,.joblist .js-expired b,.joblist .js-unconfirmed b{color:var(--bad)}
+.urlbox{display:flex;gap:8px;align-items:center;flex-wrap:wrap} .urlbox code{flex:1;min-width:0;overflow-wrap:anywhere;padding:10px 12px;border-radius:12px;background:var(--surface2);font-size:.92rem}
 /* review & print */
 .rvwrap{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:20px;align-items:start}
 .rvstrips{display:flex;flex-wrap:wrap;gap:18px;align-items:flex-start}

@@ -318,3 +318,9 @@ async function printReceipts(list, onProgress) {
   await Store.downloads.save({ filename: `pinhos-receipts-${Date.now()}.pdf`, data: blob });
   return { pdf: true, sent: pngs.length };
 }
+
+function rcTest() {
+  return `<div class="slip rc rcc"><div class="rch"><img class="rlogo" src="${esc(bwLogo())}" alt=""><div class="cname">Pinho’s</div><div class="csub">Bakery</div></div>
+    <div class="rcpick" style="margin-top:10px"><span class="kl">Test receipt</span><b class="rct">It works ✓</b><b>${esc(fmtStamp(Date.now()))}</b></div>
+    <div class="cfoot">If this printed and cut cleanly, the receipt printer is ready.</div></div>`;
+}

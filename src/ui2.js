@@ -44,6 +44,7 @@ function OrderDetail() {
       ${!ro && html`<div class="actbar">
         ${o.booking === 'confirmed' && !orderClosed(o) && html`<button class="btn primary" onClick=${() => setTab('pay')}>Pickup & payment</button>`}
         <button class="btn" onClick=${() => openPrint(items.map(x => ({ orderId: o.id, itemId: x.id })), `Order ${orderLabel(o)}`)}><${Icon} n="print" s=${18} />Print ${items.length > 1 ? `${items.length} slips` : 'slip'}</button>
+        <button class="btn" onClick=${() => ui({ review: { orderId: o.id, reprint: true, at: Date.now() } })}><${Icon} n="print" s=${18} />Reprint</button>
         <button class="btn" onClick=${() => openPrint([{ orderId: o.id, itemId: items[0].id }], `Order ${orderLabel(o)}`, 'customer')}><${Icon} n="print" s=${18} />Customer copy</button>
         <button class="btn" onClick=${() => editOrder(o)}>Edit order</button>
         <button class="btn ghost" onClick=${() => openDialog({ type: 'repeat', order: o })}>Repeat order</button>
@@ -409,49 +410,66 @@ function FmtSwitch({ P, fmt }) {
   return html`<div class="seg" role="group" aria-label="Paper">${[['receipt', 'Receipt printer'], ['letter', 'Regular paper (4 per page)']].map(([k, l]) => html`<button class=${'segb' + (fmt === k ? ' on' : '')} aria-pressed=${fmt === k} onClick=${() => ui({ print: { ...P, fmt: k } })}>${l}</button>`)}</div>`;
 }
 function usePrinterStatus() {
-  const [st, setSt] = useState(null);
+  const [st, setSt] = useState(null); const on = hasPrinter();
   useEffect(() => {
-    if (!hasPrinter()) return; let live = true;
-    const f = () => window.__printer.status().then(r => live && setSt(r)).catch(() => live && setSt({ online: false, msg: 'Could not check the printer.' }));
+    if (!on) return; let live = true;
+    const f = () => window.__printer.status().then(r => live && setSt(r)).catch(() => live && setSt({ online: false, msg: 'Could not check the receipt printer. Check the internet connection.' }));
     f(); const t = setInterval(f, 8000); return () => { live = false; clearInterval(t); };
-  }, []);
+  }, [on]);
   return st;
 }
 function PrinterLine() {
   const st = usePrinterStatus();
-  if (!hasPrinter()) return html`<div class="pstat"><i></i><span>No receipt printer on this version of the site. Printing saves an 80 mm PDF instead.</span></div>`;
+  if (!hasPrinter()) return html`<div class="pstat"><i></i><span>${window.__cloud && window.__printerInfo && !window.__printerInfo.configured ? window.__printerInfo.msg : 'No receipt printer on this version of the site.'} Printing saves an 80 mm PDF instead.</span></div>`;
   if (!st) return html`<div class="pstat"><i></i><span>Checking the receipt printer…</span></div>`;
   return html`<div class=${'pstat ' + (st.online ? 'on' : 'off')}><i></i><span>${st.msg}</span></div>`;
 }
-const JOB_TXT = { queued: 'waiting', sent: 'printing', done: 'printed', error: 'problem' };
-/** Shared engine: render, send, then follow the printer's progress. */
+const JOB_TXT = { queued: 'Waiting for printer', sent: 'Printing…', done: 'Printed ✓', error: 'Problem', expired: 'Not picked up', unconfirmed: 'Not confirmed' };
+const JOB_FINAL = new Set(['done', 'error', 'expired', 'unconfirmed']);
+/** Shared engine: render, send, then follow every job until the printer confirms it. */
 function useReceiptPrint() {
   const [phase, setPhase] = useState(''); const [err, setErr] = useState(''); const [res, setRes] = useState(null); const [jobs, setJobs] = useState(null);
+  const gen = useRef(0);
+  useEffect(() => () => { gen.current++; }, []);
   const run = async (list, entries) => {
-    if (phase) return; setErr(''); setRes(null); setJobs(null); setPhase('Preparing…');
+    if (phase) return; const g = ++gen.current; setErr(''); setRes(null); setJobs(null); setPhase('Preparing…');
     try {
       const r = await printReceipts(list, (i, n, msg) => setPhase(msg || `Preparing receipt ${i} of ${n}…`));
       if (entries && entries.length && !entries[0].o.archived) { try { await markPrinted(entries); } catch (e) { console.warn(e); } }
+      if (g !== gen.current) return;
       setRes(r); setPhase('');
-      if (r.jobIds && r.jobIds.length) follow(r.jobIds);
-    } catch (e) { setPhase(''); setErr(e && e.code === 'declined' ? 'The save was canceled. Nothing was printed.' : errText(e)); }
+      if (r.jobIds && r.jobIds.length) { setJobs(r.jobIds.map((id, k) => ({ id, label: list[k] && list[k].label, status: 'queued' }))); follow(r.jobIds, g); }
+    } catch (e) { if (g !== gen.current) return; setPhase(''); setErr(e && e.code === 'declined' ? 'The save was canceled. Nothing was printed.' : errText(e)); }
   };
-  const follow = ids => {
+  const follow = (ids, g) => {
     let n = 0;
     const tick = async () => {
-      try { const j = await window.__printer.jobs(ids); setJobs(j); if (j.every(x => x.status === 'done' || x.status === 'error') || ++n > 90) return; } catch { if (++n > 90) return; }
-      setTimeout(tick, 2000);
+      if (g !== gen.current) return;
+      try { const j = await window.__printer.jobs(ids); if (g !== gen.current) return; setJobs(j); if (j.every(x => JOB_FINAL.has(x.status))) return; } catch { }
+      if (++n < 600) setTimeout(tick, n < 30 ? 2000 : 5000);
     };
-    tick();
+    setTimeout(tick, 1500);
   };
-  let msg = '';
+  let msg = '', bad = false, finished = false;
   if (jobs && jobs.length) {
-    const done = jobs.filter(j => j.status === 'done').length; const bad = jobs.filter(j => j.status === 'error');
-    msg = bad.length ? `The printer reported a problem with ${bad.length}: ${bad[0].code || 'unknown error'}. Check paper and lid, then print again — or use regular paper.`
-      : done === jobs.length ? `Printed ${done} of ${jobs.length} ✓` : `Sent to the printer — ${done} of ${jobs.length} printed so far…`;
-  } else if (res) msg = res.pdf ? `Saved an 80 mm PDF with ${res.sent} receipts.` : `Sent ${res.sent} receipts to the printer.`;
-  const bad = !!err || !!(jobs && jobs.some(j => j.status === 'error'));
-  return { run, phase, err, msg, bad, finished: !!(res && (!jobs || jobs.every(j => j.status === 'done'))) };
+    const c = k => jobs.filter(j => j.status === k).length;
+    const done = c('done'), errs = jobs.filter(j => j.status === 'error'), exp = c('expired'), unc = c('unconfirmed');
+    if (errs.length) { bad = true; msg = `The printer reported a problem: ${errs[0].code || 'unknown error'}. Check the paper and lid, then tap Reprint — or use regular paper.`; }
+    else if (exp) { bad = true; msg = `The printer didn’t pick up ${exp === 1 ? 'a receipt' : exp + ' receipts'} within 15 minutes. When it’s back online, tap Reprint — or use regular paper.`; }
+    else if (unc) { bad = true; msg = `The printer took ${unc === 1 ? 'a receipt' : unc + ' receipts'} but never confirmed printing. Check whether ${unc === 1 ? 'it' : 'they'} came out.`; }
+    else if (done === jobs.length) { finished = true; msg = `Printed ${done === 1 ? '1 receipt' : `all ${done} receipts`} ✓`; }
+    else msg = `Sent to the receipt printer — ${done} of ${jobs.length} printed so far…`;
+  } else if (res) { finished = !!res.pdf; msg = res.pdf ? `Saved an 80 mm PDF with ${res.sent} receipts.` : `Sent ${res.sent} receipts to the printer.`; }
+  if (err) bad = true;
+  return { run, phase, err, msg, bad, finished, jobs, started: !!(phase || res || err) };
+}
+function JobList({ jobs }) {
+  if (!jobs || !jobs.length) return null;
+  return html`<ul class="joblist">${jobs.map(j => html`<li key=${j.id} class=${'js-' + j.status}><span>${(j.label || '').replace(/ bakery$/, ' · bakery slip').replace(/ customer$/, ' · customer copy')}</span><b>${JOB_TXT[j.status] || j.status}</b></li>`)}</ul>`;
+}
+function PrintStatus({ R }) {
+  if (!(R.phase || R.err || R.msg)) return null;
+  return html`<div class=${'callout ' + (R.bad ? 'bad' : R.finished ? 'good' : 'info')} role="status">${R.err || R.phase || R.msg}<${JobList} jobs=${R.jobs} /></div>`;
 }
 function Strips({ list }) {
   return html`<div class="rvstrips">${list.map((r, i) => html`<div class="rvstrip" key=${i}><p class="cap">${r.kind === 'customer' ? 'Customer copy' : 'Bakery slip'} · ${r.label.replace(/ (bakery|customer)$/, '')}</p><div style=${{ zoom: 1.2 }} dangerouslySetInnerHTML=${{ __html: r.html }}></div></div>`)}</div>`;
@@ -465,42 +483,59 @@ function ReceiptView({ P, kind }) {
     <div class="pvhead">
       <div><h2>${PRINT_KIND[kind]} — ${P.title}</h2><p class="muted small">${[nB && `${nB} bakery ${nB === 1 ? 'slip' : 'slips'}`, nC && `${nC} customer ${nC === 1 ? 'copy' : 'copies'}`].filter(Boolean).join(' + ')} · 80 mm receipt paper, cut after each</p></div>
       <div class="pvact"><${FmtSwitch} P=${P} fmt="receipt" />
-        <button class="btn primary" disabled=${!!R.phase || !list.length} onClick=${() => R.run(list, kind === 'customer' ? [] : entries)}><${Icon} n="print" s=${18} />${R.phase ? 'Working…' : hasPrinter() ? 'Print on receipt printer' : 'Save 80 mm PDF'}</button>
+        <button class="btn primary" disabled=${!!R.phase || !list.length} onClick=${() => R.run(list, kind === 'customer' ? [] : entries)}><${Icon} n="print" s=${18} />${R.phase ? 'Working…' : !hasPrinter() ? 'Save 80 mm PDF' : R.started ? 'Reprint' : 'Print on receipt printer'}</button>
+        ${hasPrinter() && html`<button class="btn" disabled=${!!R.phase || !list.length} title="Save the same receipts as an 80 mm PDF" onClick=${() => saveReceiptPdf(list)}>80 mm PDF</button>`}
         <button class="btn ghost" onClick=${close}>Close</button></div>
     </div>
     <${PrinterLine} />
-    ${(R.phase || R.err || R.msg) && html`<div class=${'callout ' + (R.bad ? 'bad' : R.finished ? 'good' : 'info')}>${R.err || R.phase || R.msg}</div>`}
+    <${PrintStatus} R=${R} />
     <${Strips} list=${list} />
   </div>`;
 }
+async function saveReceiptPdf(list) {
+  try { const pngs = await receiptPngs(list); const blob = await receiptPdf(pngs); await Store.downloads.save({ filename: `pinhos-receipts-${Date.now()}.pdf`, data: blob }); toast('Saved an 80 mm PDF.'); }
+  catch (e) { toast(errText(e), 'bad'); }
+}
+/** Opens after every confirmed save (auto-prints when a receipt printer is connected), and from "Reprint" on an order. */
 function ReviewPrint() {
   const Rv = UI.review; const o = getOrder(Rv.orderId);
-  const [sel, setSel] = useState(null); const [cust, setCust] = useState(true);
   const R = useReceiptPrint();
   const items = o ? itemsOf(o) : [];
-  const changed = items.filter(it => Rv.isNew || !it.printedHash || reprintNeeded(o, it));
-  useEffect(() => { if (o && !Rv.isNew && !changed.length) ui({ review: null }); }, [o && o.updatedAt]);
+  const init = useRef(null);
+  if (o && !init.current) {
+    const changed = items.filter(it => Rv.isNew || Rv.reprint || !it.printedHash || reprintNeeded(o, it)).map(it => it.id);
+    init.current = { ids: changed, cust: !!(Rv.isNew || Rv.reprint) };
+  }
+  const [sel, setSel] = useState(null); const [custSel, setCust] = useState(null);
+  const ids = sel || new Set(init.current ? init.current.ids : []);
+  const cust = custSel === null ? !!(init.current && init.current.cust) : custSel;
   const close = () => ui({ review: null });
-  if (!o) return html`<div class="printview" role="dialog" aria-modal="true"><p class="muted">Loading the order…</p><button class="btn" onClick=${close}>Close</button></div>`;
-  const ids = sel || new Set(changed.map(it => it.id));
   const entries = items.filter(it => ids.has(it.id)).map(it => ({ o, it }));
-  const list = [...entries.map(e => ({ kind: 'bakery', label: `${itemLabel(o, e.it)} bakery`, html: rcWork(o, e.it) })), ...(cust ? [{ kind: 'customer', label: `${orderLabel(o)} customer`, html: rcCustomer(o) }] : [])];
+  const list = o ? [...entries.map(e => ({ kind: 'bakery', label: `${itemLabel(o, e.it)} bakery`, html: rcWork(o, e.it) })), ...(cust ? [{ kind: 'customer', label: `${orderLabel(o)} customer`, html: rcCustomer(o) }] : [])] : [];
+  const nothing = init.current && !init.current.ids.length && !init.current.cust;
+  useEffect(() => { if (nothing && !Rv.reprint) ui({ review: null }); }, [nothing]);
+  const autoGo = !!(Rv.auto && hasPrinter() && o && list.length && !nothing);
+  useEffect(() => { if (autoGo && !R.started) R.run(list, entries); }, [autoGo]);
+  if (!o) return html`<div class="printview" role="dialog" aria-modal="true"><p class="muted">Loading the order…</p><button class="btn" onClick=${close}>Close</button></div>`;
   const toggle = id => { const n = new Set(ids); n.has(id) ? n.delete(id) : n.add(id); setSel(n); };
   const what = [entries.length && (entries.length === 1 ? 'bakery slip' : `${entries.length} bakery slips`), cust && 'customer copy'].filter(Boolean).join(' + ');
-  return html`<div class="printview" role="dialog" aria-modal="true" aria-label="Review and print">
-    <div class="pvhead"><div><h2>${Rv.isNew ? `Review & print — Order ${orderLabel(o)}` : `Order ${orderLabel(o)} changed — reprint?`}</h2>
-      <p class="muted small">${o.customer?.name || ''} · pickup ${fmtDateMed(o.pickupDate)} ${fmtTime(o.pickupTime)}${!Rv.isNew ? ' · only the slips that changed are ticked' : ''}</p></div>
-      <div class="pvact"><button class="btn ghost" onClick=${close}>${R.finished ? 'Done' : 'Skip for now'}</button></div></div>
+  const title = Rv.reprint ? `Reprint — Order ${orderLabel(o)}` : Rv.auto && hasPrinter() ? (Rv.isNew ? `Printing Order ${orderLabel(o)}` : `Order ${orderLabel(o)} changed — printing the updated slips`) : Rv.isNew ? `Review & print — Order ${orderLabel(o)}` : `Order ${orderLabel(o)} changed — reprint?`;
+  const changedIds = new Set(init.current ? init.current.ids : []);
+  return html`<div class="printview" role="dialog" aria-modal="true" aria-label=${title}>
+    <div class="pvhead"><div><h2>${title}</h2>
+      <p class="muted small">${o.customer?.name || ''} · pickup ${fmtDateMed(o.pickupDate)} ${fmtTime(o.pickupTime)}${!Rv.isNew && !Rv.reprint ? ' · only the slips that changed were picked' : ''}</p></div>
+      <div class="pvact"><button class="btn ghost" onClick=${close}>${R.started ? 'Done' : 'Skip for now'}</button></div></div>
     <div class="rvwrap">
       <${Strips} list=${list} />
       <div class="rvpanel">
         <${PrinterLine} />
-        ${items.length > 1 && html`<div class="fld"><span>Bakery slips</span>${items.map(it => html`<label class="check"><input type="checkbox" checked=${ids.has(it.id)} onChange=${() => toggle(it.id)} /> ${itemLabel(o, it)} · ${specHead(it)}${!Rv.isNew && changed.some(c => c.id === it.id) ? html` <span class="tag ex">changed</span>` : ''}</label>`)}</div>`}
+        <${PrintStatus} R=${R} />
+        ${items.length > 1 && html`<div class="fld"><span>Bakery slips</span>${items.map(it => html`<label class="check"><input type="checkbox" checked=${ids.has(it.id)} onChange=${() => toggle(it.id)} /> ${itemLabel(o, it)} · ${specHead(it)}${!Rv.isNew && !Rv.reprint && changedIds.has(it.id) ? html` <span class="tag ex">changed</span>` : ''}</label>`)}</div>`}
         ${items.length === 1 && html`<label class="check"><input type="checkbox" checked=${ids.has(items[0].id)} onChange=${() => toggle(items[0].id)} /> Bakery slip</label>`}
         <label class="check"><input type="checkbox" checked=${cust} onChange=${e => setCust(e.target.checked)} /> Customer copy (one for the whole order)</label>
-        <button class="btn primary big" disabled=${!!R.phase || !list.length} onClick=${() => R.run(list, entries)}><${Icon} n="print" />${R.phase ? 'Working…' : what ? `Print ${what}` : 'Nothing selected'}</button>
-        ${(R.phase || R.err || R.msg) && html`<div class=${'callout ' + (R.bad ? 'bad' : R.finished ? 'good' : 'info')}>${R.err || R.phase || R.msg}</div>`}
+        <button class="btn primary big" disabled=${!!R.phase || !list.length} onClick=${() => R.run(list, entries)}><${Icon} n="print" />${R.phase ? 'Working…' : !what ? 'Nothing selected' : R.started ? `Reprint ${what}` : `Print ${what}`}</button>
         <button class="btn" disabled=${!entries.length && !cust} onClick=${() => { close(); openPrint(entries.length ? entries.map(e => ({ orderId: o.id, itemId: e.it.id })) : [{ orderId: o.id, itemId: items[0].id }], `Order ${orderLabel(o)}`, entries.length && cust ? 'both' : entries.length ? 'slips' : 'customer', { fmt: 'letter' }); }}>Printer down? Use regular paper (4 per page)</button>
+        ${hasPrinter() && html`<button class="btn ghost" disabled=${!list.length || !!R.phase} onClick=${() => saveReceiptPdf(list)}>Save as 80 mm PDF instead</button>`}
       </div>
     </div>
   </div>`;

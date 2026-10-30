@@ -98,5 +98,18 @@
   };
   const user = { async canEdit() { return true; } };
 
+  /* Receipt printer (Star CloudPRNT via the Worker). Only switched on once the Worker says a printer key is set. */
+  const printer = {
+    send: jobs => post('/api/print', { jobs }),
+    status: () => api('/api/printer'),
+    jobs: async ids => (await api('/api/print/jobs?ids=' + ids.map(encodeURIComponent).join(','))).jobs
+  };
+  const checkPrinter = () => api('/api/printer').then(st => {
+    window.__printerInfo = st; const was = !!window.__printer;
+    window.__printer = st.configured ? printer : null;
+    if (was !== !!window.__printer && typeof window.emit === 'function') window.emit();
+  }).catch(() => { });
+  checkPrinter(); setInterval(() => { if (!document.hidden) checkPrinter(); }, 60000);
+
   window.claude = { use: async n => ({ db, assets, downloads, user })[n] || null };
 })();
