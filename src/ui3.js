@@ -553,6 +553,11 @@ function PrinterSettings() {
     catch (e) { toast('Could not clear the waiting slips. Check the internet connection.', 'bad'); }
     setClearing(false);
   };
+  const printFiles = async e => {
+    const files = [...(e.target.files || [])]; e.target.value = ''; if (!files.length) return;
+    try { const list = []; for (const f of files) list.push({ kind: 'test', label: f.name.replace(/\.[a-z0-9]+$/i, ''), canvas: await imageFileCanvas(f) }); R.run(list, []); }
+    catch (err) { toast(errText(err), 'bad'); }
+  };
   const ago = t => { const s = Math.round((Date.now() - t) / 1000); return s < 60 ? `${s} seconds ago` : s < 3600 ? `${Math.round(s / 60)} min ago` : fmtStamp(t); };
   return html`<section class="sec"><h2>Receipt printer</h2><div class="box2">
     ${!st ? html`<p class="muted">Checking…</p>` : !st.configured ? html`<p>${st.msg}</p>` : html`
@@ -567,6 +572,7 @@ function PrinterSettings() {
           <li><b>Our answer:</b> ${/^jobReady/.test(st.last.reply) ? 'a slip is ready — come get it' : 'nothing to print'}</li>
         </ul></div>`}
       <div class="inline"><button class="btn" disabled=${!!R.phase} onClick=${test}><${Icon} n="print" s=${18} />${R.phase ? 'Working…' : 'Print a test receipt'}</button>
+        <label class=${'btn' + (R.phase ? ' disabled' : '')} title="Print pictures (for example slip mock-ups) full width on the receipt printer, one after another"><${Icon} n="print" s=${18} />Print image files…<input type="file" accept="image/*" multiple class="vh" disabled=${!!R.phase} onChange=${printFiles} /></label>
         <button class="btn" disabled=${clearing || !st.queued} onClick=${clear}>${clearing ? 'Clearing…' : st.queued ? `Clear stuck jobs (${st.queued})` : 'No stuck jobs'}</button></div>
       <${PrintStatus} R=${R} />`}
   </div></section>`;

@@ -2300,6 +2300,7 @@ async function receiptPngs(list, onProgress) {
   try {
     for (let i = 0; i < list.length; i++) {
       onProgress && onProgress(i + 1, list.length);
+      if (list[i].canvas) { const c = list[i].canvas; out.push({ ...list[i], canvas: undefined, png: await toMono(c), w: RC_DOTS, h: Math.round(c.height * RC_DOTS / c.width) }); continue; }
       host.innerHTML = list[i].html.replace(/src="[^"]*" alt="" class="rlogo"|class="rlogo" src="[^"]*"/, `class="rlogo" src="${bwLogo()}"`);
       const el = host.firstElementChild; await waitImages(el);
       const c = await window.html2canvas(el, { scale: RC_SCALE, backgroundColor: '#ffffff', logging: false, width: RC_W, windowWidth: RC_W, scrollX: 0, scrollY: 0 });
@@ -2375,6 +2376,18 @@ function rcTest() {
   return `<div class="slip rc rcc"><div class="rch"><img class="rlogo" src="${esc(bwLogo())}" alt=""><div class="cname">Pinho’s</div><div class="csub">Bakery</div></div>
     <div class="rcpick" style="margin-top:10px"><span class="kl">Test receipt</span><b class="rct">It works ✓</b><b>${esc(fmtStamp(Date.now()))}</b></div>
     <div class="cfoot">If this printed and cut cleanly, the receipt printer is ready.</div></div>`;
+}
+
+/** Any picture (e.g. a slip mock-up) → a canvas ready to print full width on the receipt printer. */
+async function imageFileCanvas(file) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej({ message: `“${file.name}” isn’t a picture this browser can open.` }); i.src = url; });
+    const scale = RC_DOTS / img.naturalWidth; const c = document.createElement('canvas');
+    c.width = RC_DOTS; c.height = Math.max(1, Math.round(img.naturalHeight * scale));
+    const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height); g.imageSmoothingQuality = 'high'; g.drawImage(img, 0, 0, c.width, c.height);
+    return c;
+  } finally { URL.revokeObjectURL(url); }
 }
 
 /* ===== ui1.js — shell, Today, rows, selection, batch actions ===== */
@@ -4040,6 +4053,11 @@ function PrinterSettings() {
     catch (e) { toast('Could not clear the waiting slips. Check the internet connection.', 'bad'); }
     setClearing(false);
   };
+  const printFiles = async e => {
+    const files = [...(e.target.files || [])]; e.target.value = ''; if (!files.length) return;
+    try { const list = []; for (const f of files) list.push({ kind: 'test', label: f.name.replace(/\.[a-z0-9]+$/i, ''), canvas: await imageFileCanvas(f) }); R.run(list, []); }
+    catch (err) { toast(errText(err), 'bad'); }
+  };
   const ago = t => { const s = Math.round((Date.now() - t) / 1000); return s < 60 ? `${s} seconds ago` : s < 3600 ? `${Math.round(s / 60)} min ago` : fmtStamp(t); };
   return html`<section class="sec"><h2>Receipt printer</h2><div class="box2">
     ${!st ? html`<p class="muted">Checking…</p>` : !st.configured ? html`<p>${st.msg}</p>` : html`
@@ -4054,6 +4072,7 @@ function PrinterSettings() {
           <li><b>Our answer:</b> ${/^jobReady/.test(st.last.reply) ? 'a slip is ready — come get it' : 'nothing to print'}</li>
         </ul></div>`}
       <div class="inline"><button class="btn" disabled=${!!R.phase} onClick=${test}><${Icon} n="print" s=${18} />${R.phase ? 'Working…' : 'Print a test receipt'}</button>
+        <label class=${'btn' + (R.phase ? ' disabled' : '')} title="Print pictures (for example slip mock-ups) full width on the receipt printer, one after another"><${Icon} n="print" s=${18} />Print image files…<input type="file" accept="image/*" multiple class="vh" disabled=${!!R.phase} onChange=${printFiles} /></label>
         <button class="btn" disabled=${clearing || !st.queued} onClick=${clear}>${clearing ? 'Clearing…' : st.queued ? `Clear stuck jobs (${st.queued})` : 'No stuck jobs'}</button></div>
       <${PrintStatus} R=${R} />`}
   </div></section>`;

@@ -279,6 +279,7 @@ async function receiptPngs(list, onProgress) {
   try {
     for (let i = 0; i < list.length; i++) {
       onProgress && onProgress(i + 1, list.length);
+      if (list[i].canvas) { const c = list[i].canvas; out.push({ ...list[i], canvas: undefined, png: await toMono(c), w: RC_DOTS, h: Math.round(c.height * RC_DOTS / c.width) }); continue; }
       host.innerHTML = list[i].html.replace(/src="[^"]*" alt="" class="rlogo"|class="rlogo" src="[^"]*"/, `class="rlogo" src="${bwLogo()}"`);
       const el = host.firstElementChild; await waitImages(el);
       const c = await window.html2canvas(el, { scale: RC_SCALE, backgroundColor: '#ffffff', logging: false, width: RC_W, windowWidth: RC_W, scrollX: 0, scrollY: 0 });
@@ -354,4 +355,16 @@ function rcTest() {
   return `<div class="slip rc rcc"><div class="rch"><img class="rlogo" src="${esc(bwLogo())}" alt=""><div class="cname">Pinho’s</div><div class="csub">Bakery</div></div>
     <div class="rcpick" style="margin-top:10px"><span class="kl">Test receipt</span><b class="rct">It works ✓</b><b>${esc(fmtStamp(Date.now()))}</b></div>
     <div class="cfoot">If this printed and cut cleanly, the receipt printer is ready.</div></div>`;
+}
+
+/** Any picture (e.g. a slip mock-up) → a canvas ready to print full width on the receipt printer. */
+async function imageFileCanvas(file) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej({ message: `“${file.name}” isn’t a picture this browser can open.` }); i.src = url; });
+    const scale = RC_DOTS / img.naturalWidth; const c = document.createElement('canvas');
+    c.width = RC_DOTS; c.height = Math.max(1, Math.round(img.naturalHeight * scale));
+    const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height); g.imageSmoothingQuality = 'high'; g.drawImage(img, 0, 0, c.width, c.height);
+    return c;
+  } finally { URL.revokeObjectURL(url); }
 }
