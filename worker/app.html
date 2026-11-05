@@ -582,6 +582,7 @@ details.more[open]{display:flex;flex-direction:column;gap:10px}
 .joblist{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-direction:column;gap:4px;font-size:.9rem}
 .joblist li{display:flex;justify-content:space-between;gap:10px;padding:4px 10px;border-radius:999px;background:var(--surface)}
 .joblist li b{white-space:nowrap} .joblist .js-done b{color:var(--good)} .joblist .js-error b,.joblist .js-expired b,.joblist .js-unconfirmed b{color:var(--bad)}
+.plast{margin:2px 0 0;padding-left:1.1em;display:flex;flex-direction:column;gap:2px}
 .urlbox{display:flex;gap:8px;align-items:center;flex-wrap:wrap} .urlbox code{flex:1;min-width:0;overflow-wrap:anywhere;padding:10px 12px;border-radius:12px;background:var(--surface2);font-size:.92rem}
 /* review & print */
 .rvwrap{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:20px;align-items:start}
@@ -4030,13 +4031,30 @@ function PrinterSettings() {
   useEffect(() => { let live = true; const f = () => fetch('/api/printer', { credentials: 'same-origin' }).then(r => r.json()).then(x => { if (live) { setSt(x); window.__printerInfo = x; } }).catch(() => { }); f(); const t = setInterval(f, 8000); return () => { live = false; clearInterval(t); }; }, []);
   const copy = async () => { try { await navigator.clipboard.writeText(st.serverUrl); toast('Server URL copied.'); } catch { toast('Select the address and copy it by hand.', 'bad'); } };
   const test = () => R.run([{ kind: 'test', label: 'Test receipt', html: rcTest() }], []);
+  const [clearing, setClearing] = useState(false);
+  const clear = async () => {
+    if (!confirm(`Cancel ${st.queued === 1 ? 'the 1 slip' : `all ${st.queued} slips`} waiting for the receipt printer? They won’t print. Reprint any you still need.`)) return;
+    setClearing(true);
+    try { const r = await fetch('/api/print/clear', { method: 'POST', credentials: 'same-origin' }).then(r => r.json()); toast(`Cleared ${r.cleared} waiting ${r.cleared === 1 ? 'slip' : 'slips'}.`);
+      const x = await fetch('/api/printer', { credentials: 'same-origin' }).then(r => r.json()); setSt(x); window.__printerInfo = x; }
+    catch (e) { toast('Could not clear the waiting slips. Check the internet connection.', 'bad'); }
+    setClearing(false);
+  };
+  const ago = t => { const s = Math.round((Date.now() - t) / 1000); return s < 60 ? `${s} seconds ago` : s < 3600 ? `${Math.round(s / 60)} min ago` : fmtStamp(t); };
   return html`<section class="sec"><h2>Receipt printer</h2><div class="box2">
     ${!st ? html`<p class="muted">Checking…</p>` : !st.configured ? html`<p>${st.msg}</p>` : html`
       <div class=${'pstat ' + (st.online ? 'on' : 'off')}><i></i><span>${st.msg}</span></div>
       <div class="fld"><span>Server URL to enter on the printer (CloudPRNT)</span>
         <div class="urlbox"><code>${st.serverUrl}</code><button class="btn sm" onClick=${copy}>Copy</button></div>
         <small class="muted">Keep this address private: anyone who has it can send paper to your printer (they can’t see orders).</small></div>
-      <div class="inline"><button class="btn" disabled=${!!R.phase} onClick=${test}><${Icon} n="print" s=${18} />${R.phase ? 'Working…' : 'Print a test receipt'}</button></div>
+      ${st.last && html`<div class="fld"><span>Last check-in from the printer</span>
+        <ul class="small plast">
+          <li><b>When:</b> ${ago(st.last.at)}</li>
+          <li><b>Printer status:</b> ${st.last.code || '(none sent)'}${st.last.busy ? ' · says it’s busy printing' : ''}</li>
+          <li><b>Our answer:</b> ${/^jobReady/.test(st.last.reply) ? 'a slip is ready — come get it' : 'nothing to print'}</li>
+        </ul></div>`}
+      <div class="inline"><button class="btn" disabled=${!!R.phase} onClick=${test}><${Icon} n="print" s=${18} />${R.phase ? 'Working…' : 'Print a test receipt'}</button>
+        <button class="btn" disabled=${clearing || !st.queued} onClick=${clear}>${clearing ? 'Clearing…' : st.queued ? `Clear stuck jobs (${st.queued})` : 'No stuck jobs'}</button></div>
       <${PrintStatus} R=${R} />`}
   </div></section>`;
 }

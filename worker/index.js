@@ -164,56 +164,87 @@ async function keyMatches(given, env) {
 }
 const dec = s => { try { return decodeURIComponent(String(s || '')); } catch { return String(s || ''); } };
 const okCode = c => /^(ok|2\d\d)/i.test(dec(c).trim());
-let lastSeenWrite = 0, lastSeenCode = '';
+let lastSeenWrite = 0, lastSeenSig = '';
+/** Remember the printer's last check-in (shown in Settings). D1 writes are throttled to ~1 every 20 s unless something changes. */
 async function notePrinter(env, info) {
-  const now = Date.now();
-  if (now - lastSeenWrite < 20e3 && info.code === lastSeenCode) return;    // keep D1 writes low: ~1 every 20 s
-  lastSeenWrite = now; lastSeenCode = info.code;
+  const now = Date.now(); const sig = [info.code, info.busy, info.reply].join('|');
+  if (now - lastSeenWrite < 20e3 && sig === lastSeenSig) return;
+  lastSeenWrite = now; lastSeenSig = sig;
   await env.DB.prepare(`INSERT INTO docs (path, coll, data, deleted, ver) VALUES ('printer/main', 'printer', ?, 0, 0)
     ON CONFLICT(path) DO UPDATE SET data = excluded.data`).bind(JSON.stringify({ ...info, at: now })).run();
 }
-async function tidyJobs(env) {
-  const now = Date.now();
+/** Jobs that can no longer print must never sit in the way of new ones. Runs on every printer poll. */
+async function expireJobs(env, now = Date.now()) {
   await env.DB.batch([
     env.DB.prepare(`UPDATE jobs SET status = 'expired', png = NULL, updated = ? WHERE status = 'queued' AND created < ?`).bind(now, now - JOB_EXPIRE_MS),
     env.DB.prepare(`UPDATE jobs SET status = 'unconfirmed', updated = ? WHERE status = 'sent' AND updated < ?`).bind(now, now - JOB_CONFIRM_MS),
+    env.DB.prepare(`UPDATE jobs SET status = 'error', code = 'image missing', updated = ? WHERE status = 'queued' AND png IS NULL`).bind(now)
+  ]);
+}
+async function tidyJobs(env) {
+  const now = Date.now();
+  await expireJobs(env, now);
+  await env.DB.batch([
     env.DB.prepare(`UPDATE jobs SET png = NULL WHERE status IN ('done','error','expired','unconfirmed') AND updated < ?`).bind(now - 24 * 3600e3),
     env.DB.prepare(`DELETE FROM jobs WHERE created < ?`).bind(now - 7 * 24 * 3600e3)
   ]);
 }
+/* One log line per printer request, visible in Cloudflare → Workers → pinhos-orders → Logs (real-time) / Observability.
+   Search for "cloudprnt". The printer key is never logged. */
+const plog = o => console.log(JSON.stringify({ cloudprnt: true, ...o }));
+const clip = (v, n = 1500) => { const t = typeof v === 'string' ? v : JSON.stringify(v); return t && t.length > n ? t.slice(0, n) + '…' : t; };
 function b64ToBytes(b64) { const bin = atob(b64); const out = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i); return out; }
 async function handlePrinter(req, env, url) {
   const key = decodeURIComponent(url.pathname.slice('/cloudprnt/'.length).replace(/\/+$/, ''));
-  if (!await keyMatches(key, env)) return new Response('Not found', { status: 404 });
+  if (!await keyMatches(key, env)) { plog({ step: 'rejected', method: req.method, why: 'printer key does not match PRINTER_KEY' }); return new Response('Not found', { status: 404 }); }
   const q = url.searchParams; const now = Date.now();
-  if (req.method === 'POST') {
-    let b = {}; try { b = await req.json(); } catch { }
-    await notePrinter(env, { mac: b.printerMAC || q.get('mac') || '', code: dec(b.statusCode), status: b.status || '', busy: !!b.printingInProgress });
-    if (b.printingInProgress) return json({ jobReady: false });
-    await env.DB.prepare(`UPDATE jobs SET status = 'expired', png = NULL, updated = ? WHERE status = 'queued' AND created < ?`).bind(now, now - JOB_EXPIRE_MS).run();
-    const job = await env.DB.prepare(`SELECT id FROM jobs WHERE status = 'queued' ORDER BY created, id LIMIT 1`).first();
-    return json(job ? { jobReady: true, mediaTypes: ['image/png'], jobToken: job.id } : { jobReady: false });
+  const query = Object.fromEntries([...q.entries()].filter(([k]) => k !== 'key'));
+  try {
+    if (req.method === 'POST') {
+      const raw = await req.text(); let b = {};
+      try { const j = JSON.parse(raw || '{}'); if (j && typeof j === 'object' && !Array.isArray(j)) b = j; } catch { }
+      await expireJobs(env, now);
+      // We hand out a job whatever statusCode / printingInProgress say: the printer itself decides whether it can
+      // print now (it simply doesn't fetch while busy). Gating here stalled jobs on firmware that reports differently.
+      const job = await env.DB.prepare(`SELECT id FROM jobs WHERE status = 'queued' AND png IS NOT NULL ORDER BY created, id LIMIT 1`).first();
+      const reply = job ? { jobReady: true, mediaTypes: ['image/png'], jobToken: job.id } : { jobReady: false };
+      plog({ step: 'poll', statusCode: dec(b.statusCode), printingInProgress: b.printingInProgress, printerMAC: b.printerMAC || q.get('mac') || '',
+        clientAction: b.clientAction ?? null, status: b.status, fields: Object.keys(b), contentType: req.headers.get('content-type'), query,
+        body: b && Object.keys(b).length ? undefined : clip(raw, 500), reply });
+      await notePrinter(env, { mac: b.printerMAC || q.get('mac') || '', code: dec(b.statusCode), status: b.status || '', busy: !!b.printingInProgress,
+        clientAction: b.clientAction ?? null, fields: Object.keys(b), reply: job ? 'jobReady ' + job.id : 'no job' });
+      return json(reply);
+    }
+    const confirm = req.method === 'DELETE' || (req.method === 'GET' && q.has('delete'));
+    const token = q.get('token');
+    if (confirm) {
+      const job = token ? await env.DB.prepare(`SELECT id, tries FROM jobs WHERE id = ?`).bind(token).first()
+        : await env.DB.prepare(`SELECT id, tries FROM jobs WHERE status = 'sent' ORDER BY updated DESC LIMIT 1`).first();
+      const code = dec(q.get('code'));
+      let result = 'no matching job';
+      if (job) {
+        if (okCode(code)) { await env.DB.prepare(`UPDATE jobs SET status = 'done', code = ?, updated = ? WHERE id = ?`).bind(code || 'OK', now, job.id).run(); result = 'done'; }
+        else if (!/^5/.test(code) && job.tries < 3) { await env.DB.prepare(`UPDATE jobs SET status = 'queued', code = ?, updated = ? WHERE id = ?`).bind(code, now, job.id).run(); result = 'requeued (printer problem)'; }
+        else { await env.DB.prepare(`UPDATE jobs SET status = 'error', code = ?, updated = ? WHERE id = ?`).bind(code || 'unknown error', now, job.id).run(); result = 'error'; }
+      }
+      plog({ step: 'confirm', method: req.method, code, token, job: job ? job.id : null, result, query });
+      return json({ ok: true });
+    }
+    if (req.method === 'GET') {
+      const job = token ? await env.DB.prepare(`SELECT id, png FROM jobs WHERE id = ? AND png IS NOT NULL AND status IN ('queued','sent')`).bind(token).first()
+        : await env.DB.prepare(`SELECT id, png FROM jobs WHERE status = 'queued' AND png IS NOT NULL ORDER BY created, id LIMIT 1`).first();
+      if (!job) { plog({ step: 'fetch', token, result: 'no job (404)', query }); return new Response('No job', { status: 404 }); }
+      await env.DB.prepare(`UPDATE jobs SET status = 'sent', tries = tries + 1, updated = ? WHERE id = ?`).bind(now, job.id).run();
+      const bytes = b64ToBytes(job.png);
+      plog({ step: 'fetch', token, job: job.id, type: q.get('type'), bytes: bytes.length, result: 'sent image/png', query });
+      return new Response(bytes, { headers: { 'content-type': 'image/png', 'x-star-cut': 'partial', 'x-star-imageditherpattern': 'none', 'cache-control': 'no-store' } });
+    }
+    plog({ step: 'other', method: req.method, query });
+    return new Response('Method not allowed', { status: 405 });
+  } catch (e) {
+    plog({ step: 'error', method: req.method, error: String(e && e.stack || e) });
+    return json({ jobReady: false }, 200);
   }
-  const confirm = req.method === 'DELETE' || (req.method === 'GET' && q.has('delete'));
-  const token = q.get('token');
-  if (confirm) {
-    const job = token ? await env.DB.prepare(`SELECT id, tries FROM jobs WHERE id = ?`).bind(token).first()
-      : await env.DB.prepare(`SELECT id, tries FROM jobs WHERE status = 'sent' ORDER BY updated DESC LIMIT 1`).first();
-    if (!job) return json({ ok: true });
-    const code = dec(q.get('code'));
-    if (okCode(code)) await env.DB.prepare(`UPDATE jobs SET status = 'done', code = ?, updated = ? WHERE id = ?`).bind(code || 'OK', now, job.id).run();
-    else if (!/^5/.test(code) && job.tries < 3) await env.DB.prepare(`UPDATE jobs SET status = 'queued', code = ?, updated = ? WHERE id = ?`).bind(code, now, job.id).run();   // printer problem (paper, cover): try again
-    else await env.DB.prepare(`UPDATE jobs SET status = 'error', code = ?, updated = ? WHERE id = ?`).bind(code || 'unknown error', now, job.id).run();
-    return json({ ok: true });
-  }
-  if (req.method === 'GET') {
-    const job = token ? await env.DB.prepare(`SELECT id, png FROM jobs WHERE id = ? AND png IS NOT NULL AND status IN ('queued','sent')`).bind(token).first()
-      : await env.DB.prepare(`SELECT id, png FROM jobs WHERE status = 'queued' AND png IS NOT NULL ORDER BY created, id LIMIT 1`).first();
-    if (!job) return new Response('No job', { status: 404 });
-    await env.DB.prepare(`UPDATE jobs SET status = 'sent', tries = tries + 1, updated = ? WHERE id = ?`).bind(now, job.id).run();
-    return new Response(b64ToBytes(job.png), { headers: { 'content-type': 'image/png', 'x-star-cut': 'partial', 'x-star-imageditherpattern': 'none', 'cache-control': 'no-store' } });
-  }
-  return new Response('Method not allowed', { status: 405 });
 }
 function pngInfo(bytes) {
   const sig = [137, 80, 78, 71, 13, 10, 26, 10];
@@ -224,15 +255,19 @@ async function printerStatus(env, url) {
   if (!env.PRINTER_KEY) return { configured: false, online: false, msg: 'Receipt printer not set up yet: add the PRINTER_KEY secret in Cloudflare.' };
   const r = await env.DB.prepare(`SELECT data FROM docs WHERE path = 'printer/main'`).first();
   const p = r ? JSON.parse(r.data) : null; const now = Date.now();
-  const q = await env.DB.prepare(`SELECT COUNT(*) AS n FROM jobs WHERE status IN ('queued','sent')`).first();
+  await expireJobs(env, now);
+  const q = await env.DB.prepare(`SELECT COUNT(*) AS n, MIN(created) AS oldest FROM jobs WHERE status IN ('queued','sent')`).first();
   const serverUrl = url.origin + '/cloudprnt/' + env.PRINTER_KEY;
   if (!p) return { configured: true, online: false, queued: q.n, serverUrl, msg: 'The receipt printer has never checked in. Enter the Server URL on the printer (Settings → Receipt printer).' };
   const age = now - p.at; const online = age < ONLINE_MS + 20e3;
   const code = p.code || ''; const healthy = okCode(code) || !code;
   const mins = Math.round(age / 60e3);
   const msg = !online ? `Receipt printer offline — last checked in ${mins < 1 ? 'under a minute' : mins === 1 ? '1 minute' : mins < 120 ? mins + ' minutes' : Math.round(mins / 60) + ' hours'} ago. Check it’s on and on Wi-Fi, or use regular paper.`
-    : healthy ? `Receipt printer online${q.n ? ` · ${q.n} waiting` : ''}` : `Receipt printer needs attention: ${code}`;
-  return { configured: true, online: online && healthy, reachable: online, code, lastSeen: p.at, queued: q.n, serverUrl, msg };
+    : !healthy ? `Receipt printer needs attention: ${code}`
+    : q.n && now - q.oldest > 45e3 ? `Receipt printer is checking in but hasn’t picked up ${q.n === 1 ? 'the waiting slip' : `${q.n} waiting slips`} — see Settings → Receipt printer.`
+    : `Receipt printer online${q.n ? ` · ${q.n} waiting` : ''}`;
+  const last = { code: p.code || '', busy: !!p.busy, reply: p.reply || '', fields: p.fields || [], clientAction: p.clientAction ?? null, at: p.at };
+  return { configured: true, online: online && healthy, reachable: online, code, lastSeen: p.at, queued: q.n, serverUrl, msg, last };
 }
 async function handlePrintApi(req, env, url) {
   const p = url.pathname;
@@ -255,6 +290,11 @@ async function handlePrintApi(req, env, url) {
     await env.DB.batch(stmts);
     try { await tidyJobs(env); } catch (e) { console.warn('tidy', e); }
     return json({ ids });
+  }
+  if (p === '/api/print/clear' && req.method === 'POST') {
+    const r = await env.DB.prepare(`UPDATE jobs SET status = 'expired', code = 'cleared by staff', png = NULL, updated = ? WHERE status IN ('queued','sent')`).bind(Date.now()).run();
+    plog({ step: 'cleared by staff', jobs: r.meta.changes });
+    return json({ cleared: r.meta.changes });
   }
   if (p === '/api/print/jobs') {
     const ids = (url.searchParams.get('ids') || '').split(',').filter(Boolean).slice(0, 60);
