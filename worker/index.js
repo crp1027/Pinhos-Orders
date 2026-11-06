@@ -164,7 +164,7 @@ async function keyMatches(given, env) {
 }
 const dec = s => { try { return decodeURIComponent(String(s || '')); } catch { return String(s || ''); } };
 const okCode = c => /^(ok|2\d\d)/i.test(dec(c).trim());
-let lastSeenWrite = 0, lastSeenSig = '';
+let lastSeenWrite = 0, lastSeenSig = '', busySince = 0; const BUSY_MAX_MS = 60e3;
 /** Remember the printer's last check-in (shown in Settings). D1 writes are throttled to ~1 every 20 s unless something changes. */
 async function notePrinter(env, info) {
   const now = Date.now(); const sig = [info.code, info.busy, info.reply].join('|');
@@ -204,11 +204,15 @@ async function handlePrinter(req, env, url) {
       const raw = await req.text(); let b = {};
       try { const j = JSON.parse(raw || '{}'); if (j && typeof j === 'object' && !Array.isArray(j)) b = j; } catch { }
       await expireJobs(env, now);
-      // We hand out a job whatever statusCode / printingInProgress say: the printer itself decides whether it can
-      // print now (it simply doesn't fetch while busy). Gating here stalled jobs on firmware that reports differently.
-      const job = await env.DB.prepare(`SELECT id FROM jobs WHERE status = 'queued' AND png IS NOT NULL ORDER BY created, id LIMIT 1`).first();
+      // While the printer says it's still printing, hold the next job: fetching a second long image mid-print can run the
+      // printer out of memory (Star 511 "Media Decoding Error"). Safety net: if it reports busy for over a minute with
+      // jobs waiting, hand them out anyway, so firmware that always reports busy can't stall the queue.
+      const busy = b.printingInProgress === true || b.printingInProgress === 'true';
+      if (busy) { if (!busySince) busySince = now; } else busySince = 0;
+      const hold = busy && now - busySince < BUSY_MAX_MS;
+      const job = hold ? null : await env.DB.prepare(`SELECT id FROM jobs WHERE status = 'queued' AND png IS NOT NULL ORDER BY created, id LIMIT 1`).first();
       const reply = job ? { jobReady: true, mediaTypes: ['image/png'], jobToken: job.id } : { jobReady: false };
-      plog({ step: 'poll', statusCode: dec(b.statusCode), printingInProgress: b.printingInProgress, printerMAC: b.printerMAC || q.get('mac') || '',
+      plog({ step: 'poll', statusCode: dec(b.statusCode), printingInProgress: b.printingInProgress, held: hold ? 'printer busy, next job waits' : undefined, printerMAC: b.printerMAC || q.get('mac') || '',
         clientAction: b.clientAction ?? null, status: b.status, fields: Object.keys(b), contentType: req.headers.get('content-type'), query,
         body: b && Object.keys(b).length ? undefined : clip(raw, 500), reply });
       await notePrinter(env, { mac: b.printerMAC || q.get('mac') || '', code: dec(b.statusCode), status: b.status || '', busy: !!b.printingInProgress,
@@ -224,7 +228,7 @@ async function handlePrinter(req, env, url) {
       let result = 'no matching job';
       if (job) {
         if (okCode(code)) { await env.DB.prepare(`UPDATE jobs SET status = 'done', code = ?, updated = ? WHERE id = ?`).bind(code || 'OK', now, job.id).run(); result = 'done'; }
-        else if (!/^5/.test(code) && job.tries < 3) { await env.DB.prepare(`UPDATE jobs SET status = 'queued', code = ?, updated = ? WHERE id = ?`).bind(code, now, job.id).run(); result = 'requeued (printer problem)'; }
+        else if (/^5/.test(code) ? job.tries < 2 : job.tries < 3) { await env.DB.prepare(`UPDATE jobs SET status = 'queued', code = ?, updated = ? WHERE id = ?`).bind(code, now, job.id).run(); result = /^5/.test(code) ? 'requeued once (printer could not read it)' : 'requeued (printer problem)'; }
         else { await env.DB.prepare(`UPDATE jobs SET status = 'error', code = ?, updated = ? WHERE id = ?`).bind(code || 'unknown error', now, job.id).run(); result = 'error'; }
       }
       plog({ step: 'confirm', method: req.method, code, token, job: job ? job.id : null, result, query });
