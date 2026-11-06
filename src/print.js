@@ -236,7 +236,92 @@ async function makePdf(pages, onProgress) {
 
 /* ===== receipt printer (Star TSP143IV, 80 mm paper, 576 dots across) ===== */
 const RC_W = 256, RC_DOTS = 576, RC_SCALE = RC_DOTS / RC_W;
-function rcWork(o, it) { return `<div class="slip rc">${slipHeader(o, it, 1, 1)}<div class="sb">${boxed(slipBlocks(o, it, { receipt: true }), {})}</div>${slipFooter(o, it, true, 1, 1)}</div>`; }
+/* Bakery work slip for the receipt printer ("Option D"): boxed sections, each a grid of label/value boxes. No prices. */
+function rcSizeShape(it) {
+  const tk = typeKeyOf(it); const sz = it.size || ''; const k = it.sizeKey || '';
+  const cup = n => n ? `${n} cupcakes` : 'Cupcakes';
+  if (tk === 'cupcakecake') return { size: cup(it.qty), shape: (it.shapeDesc || '').trim() || 'Cupcake cake' };
+  if (tk === 'cupcakes') return { size: cup(it.qty), shape: 'Cupcakes' };
+  if (tk === 'tier') { const t = (it.tiers || []).map(x => (x.size || '').replace(/-inch.*/, '')).reverse(); return { size: t.length ? t.join(' + ') + ' in' : sz, shape: /heart/i.test(sz) ? 'Heart, tiered' : 'Tiered' }; }
+  if (tk === 'single') return { size: sz.replace(/, single layer/i, ''), shape: 'Single layer' };
+  if (/^r\d+/.test(k) || /round/i.test(sz)) return { size: sz.replace(/\s*round/i, ''), shape: 'Round' };
+  if (/square/i.test(sz)) return { size: sz.replace(/\s*square/i, ''), shape: 'Square' };
+  if (/sheet/i.test(sz)) return { size: sz, shape: 'Sheet' };
+  return { size: sz || '—', shape: '' };
+}
+function rcLastRevision(o) {
+  const h = mapList(o.history).filter(x => /^Order details edited/.test(x.text || '')).sort((a, b) => (b.at || 0) - (a.at || 0))[0];
+  if (!h) return null;
+  const parts = String(h.text).split(' · ').slice(1).filter(x => !/^total /.test(x));
+  return { at: h.at, changed: parts.join('; ') };
+}
+function rcWork(o, it) {
+  const tk = typeKeyOf(it); const its = itemsOf(o); const idx = its.findIndex(x => x.id === it.id) + 1;
+  const box = (label, val, cls = '', span = '') => `<div class="rw-c ${span ? 'rw-' + span : ''}"><div class="rw-l">${esc(label)}</div><div class="rw-v ${cls ? 'rw-' + cls : ''}">${val}</div></div>`;
+  const bar = t => `<div class="rw-hb">${esc(t)}</div>`;
+  const filling = (x, prefix = '') => {
+    const mode = fillModeOf(x);
+    if (mode === 'half') return `<div class="rw-c"><div class="rw-l">${esc(prefix)}Split filling</div><div class="rw-sub">Same split in every filling layer</div><div class="rw-halves"><div class="rw-hbx"><div class="rw-l">Half 1</div><div class="rw-v">${esc(x.filling || '—')}</div></div><div class="rw-hbx"><div class="rw-l">Half 2</div><div class="rw-v">${esc(x.filling2 || '—')}</div></div></div></div>`;
+    if (mode === 'layer') return box(`${prefix}Filling · layer 1`, esc(x.filling || '—'), '', 's3') + box(`${prefix}Filling · layer 2`, esc(x.filling2 || '—'), '', 's3');
+    return box(`${prefix}Filling`, esc(x.filling || (tk === 'single' ? 'None (single layer)' : '—')));
+  };
+  const revised = !!(it.printedHash && it.printedHash !== slipHash(o, it));
+  const imgs = mapList(it.images); const A = it.addons || {}; const ex = extrasOf(it).filter(x => (x.desc || '').trim());
+  const tags = [it.frozen && 'FROZEN', it.plan && 'ADVANCE WORK', (imgs.length || A.animated || A.portrait) && 'PHOTO', ex.length && 'EXTRAS', revised && 'REVISED', o.demo && 'PRACTICE', o.booking === 'draft' && 'DRAFT'].filter(Boolean);
+  const ss = rcSizeShape(it); const gs = groupsOf(it);
+  // FILL & ICE
+  let cake = bar('Fill & ice');
+  if (tk === 'other') cake += box('Item', esc(it.type || 'Custom item') + (it.qty ? ` · ${esc(it.qty)}` : ''), 'xl');
+  else cake += box('Size', esc(ss.size), ss.size.length > 9 ? '' : 'xl', 's3') + box('Shape', esc(ss.shape || '—'), ss.shape.length > 14 ? 'm' : 'xl', 's3');
+  if (tk === 'tier' && (it.tiers || []).length) {
+    it.tiers.forEach((t, k) => { const p = `Tier ${k + 1}${k === 0 && it.tiers.length > 1 ? ' (bottom)' : ''}${t.size ? ' · ' + t.size : ''} · `; cake += box(p + 'Flavor', esc(flavorLong(t) || '—')) + filling(t, `Tier ${k + 1} · `); });
+  } else if (gs.length) {
+    gs.forEach((g, k) => { cake += `<div class="rw-c"><div class="rw-l">Group ${k + 1} · ${esc(g.qty || '?')}</div><div class="rw-v">${esc(g.flavor || '—')}</div>${g.filling ? `<div class="rw-sub">Filling: ${esc(g.filling)}</div>` : ''}<div class="rw-sub">Icing: ${esc(g.icing || it.icing || '—')}</div></div>`; });
+  } else if (tk !== 'other' || it.flavor) {
+    cake += box('Flavor', esc(flavorLong(it) || '—'));
+    if (tk !== 'cupcakecake' && (tk === 'standard' || it.filling || tk === 'single')) cake += filling(it);
+  }
+  if (!gs.length && (tk !== 'other' || it.icing)) cake += box('Icing', esc(it.icing || '—'));
+  const prod = [];
+  if (it.attention && it.attention.on) prod.push('NEEDS ATTENTION: ' + it.attention.reason);
+  if (it.plan) prod.push(`Early work: ${STAGES[it.plan.milestone]} on ${fmtDateMed(it.plan.date)}`);
+  for (const n of mapList(it.notes).filter(n => n.kind !== 'cust')) prod.push(n.text);
+  if (prod.length) cake += box('Production notes', prod.map(esc).join('<br>'), 'm');
+  // DECORATE / WRITING
+  const writing = bar('Decorate / writing') + (it.noInscription
+    ? `<div class="rw-c"><div class="rw-noinsc">NO INSCRIPTION</div></div>`
+    : `<div class="rw-c"><div class="rw-l">Exact inscription</div><div class="rw-insc">${it.inscription ? esc(it.inscription) : '<i>Not entered yet</i>'}</div></div>` + (it.inscriptionColor ? box('Text color', esc(it.inscriptionColor)) : ''));
+  // DECORATE / DESIGN
+  const pic = [A.animated && 'Animated picture', A.portrait && 'Personal portrait', ...imgs.map(im => IMG_PURPOSE[im.purpose] || 'Picture (purpose not set)')].filter(Boolean);
+  const theme = [it.decoration, it.colors && `Colors: ${it.colors}`, A.themeOn && !it.decoration && 'Theme decoration', A.figuresOn && 'Figures'].filter(Boolean);
+  const reqs = [it.requests, ...mapList(it.notes).filter(n => n.kind === 'cust').map(n => n.text)].filter(Boolean);
+  let design = '';
+  if (pic.length) design += box('Picture', esc([...new Set(pic)].join('; ')), 'm');
+  if (it.picturePhone) design += box('Picture contact', esc(fmtPhone(it.picturePhone)), 'm');
+  if (imgs.length) design += box('Photo file', esc(imgs.map(im => im.name || 'photo').join(', ')) + ' · in the app', 'm');
+  if (theme.length) design += box('Theme', theme.map(esc).join('<br>'), 'm');
+  if (ex.length) design += box('Extras', ex.map(x => esc(x.desc)).join('<br>'), 'm');
+  if (reqs.length) design += box('Customer requests', reqs.map(esc).join('<br>'), 'm');
+  const rev = revised ? rcLastRevision(o) : null;
+  return `<div class="rcw">
+    <div class="rw-g">${bar('Pickup')}<div class="rw-c"><div class="rw-day">${esc(fmtDateMed(o.pickupDate).replace(/^(\w+) /, '$1, '))}</div><div class="rw-time">${esc(fmtTime(o.pickupTime))}</div></div>
+      <div class="rw-c rw-s4"><div class="rw-l">Order</div><div class="rw-num">${esc(itemLabel(o, it))}</div></div>
+      <div class="rw-c rw-s2"><div class="rw-l">Item</div><div class="rw-of">${idx} of ${its.length}</div></div></div>
+    ${tags.length ? `<div class="rw-tags">${tags.map(t => `<div class="rw-tag">${t}</div>`).join('')}</div>` : ''}
+    <div class="rw-g"><div class="rw-c"><div class="rw-l">Customer</div><div class="rw-v">${esc(o.customer?.name || '(no name)')}</div><div class="rw-phone">${esc(fmtPhone(o.customer?.phone) || 'no phone')}</div></div>
+      ${o.takenBy ? `<div class="rw-c rw-row"><div class="rw-l">Order taken by</div><div class="rw-v">${esc(o.takenBy)}</div></div>` : ''}</div>
+    <div class="rw-g">${cake}</div>
+    <div class="rw-g">${writing}</div>
+    ${design ? `<div class="rw-g">${bar('Decorate / design')}${design}</div>` : ''}
+    <div class="rw-g">
+      <div class="rw-c rw-s2 rw-ck"><div class="rw-bx"></div><div class="rw-l">Filled</div></div><div class="rw-c rw-s2 rw-ck"><div class="rw-bx"></div><div class="rw-l">Iced</div></div><div class="rw-c rw-s2 rw-ck"><div class="rw-bx"></div><div class="rw-l">Decorated</div></div>
+      <div class="rw-c"><div class="rw-l">Notes</div><div class="rw-notes"></div></div>
+      <div class="rw-c rw-s4"><div class="rw-l">Stored</div><div class="rw-wl">${it.storage ? esc(it.storage) : ''}</div></div>
+      <div class="rw-c rw-s2 rw-ck rw-big"><div class="rw-bx"></div><div class="rw-l">Ready</div></div>
+    </div>
+    <div class="rw-foot">${rev ? `<div class="rw-rv">REV ${esc(o.editRev || 2)} · ${esc(fmtStamp(rev.at))}</div>${rev.changed ? `<div class="rw-ch">Changed: ${esc(rev.changed)}</div>` : ''}` : ''}<div class="rw-pr">Printed ${esc(fmtStamp(Date.now()))}</div></div>
+  </div>`;
+}
 function rcCustomer(o) {
   return `<div class="slip rc rcc">
     <div class="rch"><img class="rlogo" src="${esc(bwLogo())}" alt=""><div class="cname">Pinho’s</div><div class="csub">Bakery</div><div class="cinfo">${esc(BAKERY.addr)}<br>${esc(BAKERY.phone)}</div></div>
@@ -271,7 +356,7 @@ function bwLogo() {
 }
 async function receiptPngs(list, onProgress) {
   await loadScript('https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js');
-  if (document.fonts) { try { await document.fonts.load(`46px 'Great Vibes'`); await document.fonts.ready; } catch { } }
+  if (document.fonts) { try { await Promise.all([`46px 'Great Vibes'`, `800 20px 'Archivo'`, `700 20px 'Archivo'`, `600 12px 'Archivo'`, `700 20px 'Archivo Narrow'`].map(f => document.fonts.load(f))); await document.fonts.ready; } catch { } }
   _bwLogo = null;
   const host = document.createElement('div'); host.className = 'pdf-host';
   host.style.cssText = `position:fixed;left:0;top:0;z-index:-50;pointer-events:none;width:${RC_W}px;background:#fff`;
