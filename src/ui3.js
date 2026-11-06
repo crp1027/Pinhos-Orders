@@ -502,6 +502,7 @@ function OptionsScreen() {
   useEffect(() => { Store.assets && Store.assets.list && Store.assets.list().then(r => setUsage(r.usage)).catch(() => { }); }, []);
   return html`<div class="screen options"><h1>Menu, prices & settings</h1>
     ${window.__cloud && html`<${PrinterSettings} />`}
+    <${ImportOrders} />
     <section class="sec"><h2>Backup</h2><div class="box2">
       <p>Download a spreadsheet of orders (customer, phone, pickup, cake details, inscription, prices, balance) so you can keep working from paper if the site is ever unavailable. Photos are not included.</p>
       <div class="inline"><button class="btn primary" onClick=${() => openDialog({ type: 'backup' })}><${Icon} n="list" />Download backup…</button><span class="muted small">Tip: download one every week and before busy weekends.</span></div></div></section>
@@ -575,5 +576,48 @@ function PrinterSettings() {
         <label class=${'btn' + (R.phase ? ' disabled' : '')} title="Print pictures (for example slip mock-ups) full width on the receipt printer, one after another"><${Icon} n="print" s=${18} />Print image files…<input type="file" accept="image/*" multiple class="vh" disabled=${!!R.phase} onChange=${printFiles} /></label>
         <button class="btn" disabled=${clearing || !st.queued} onClick=${clear}>${clearing ? 'Clearing…' : st.queued ? `Clear stuck jobs (${st.queued})` : 'No stuck jobs'}</button></div>
       <${PrintStatus} R=${R} />`}
+  </div></section>`;
+}
+
+/* ---------- import orders from a file (e.g. paper orders read by another chat) ---------- */
+function ImportOrders() {
+  const [rows, setRows] = useState(null); const [err, setErr] = useState(''); const [busy, setBusy] = useState(''); const [done, setDone] = useState(null);
+  const pick = async e => {
+    const file = e.target.files && e.target.files[0]; e.target.value = ''; if (!file) return;
+    setErr(''); setDone(null);
+    try { const r = parseImportFile(await file.text()); setRows(r.map(x => ({ ...x, on: !x.dup }))); }
+    catch (x) { setRows(null); setErr(errText(x)); }
+  };
+  const go = async () => {
+    const list = rows.filter(r => r.on); const out = { confirmed: 0, drafts: 0, failed: [], ids: [] };
+    for (let i = 0; i < list.length; i++) {
+      setBusy(`Saving ${i + 1} of ${list.length}…`);
+      const r = list[i];
+      try { const id = await saveOrderForm(r.form, r.missing.length ? 'draft' : 'confirm'); out.ids.push(id); r.missing.length ? out.drafts++ : out.confirmed++; }
+      catch (x) { out.failed.push(`${r.form.customer.name || r.src}: ${errText(x)}`); }
+    }
+    setBusy(''); setRows(null); setDone(out);
+  };
+  const n = rows ? rows.filter(r => r.on).length : 0;
+  const nd = rows ? rows.filter(r => r.on && r.missing.length).length : 0;
+  return html`<section class="sec"><h2>Import orders</h2><div class="box2">
+    <p class="small muted">Load a <code>pinhos-import-….json</code> file (for example, paper orders read from photos). You’ll see every order before anything is saved. Nothing prints.</p>
+    <div class="inline"><label class=${'btn' + (busy ? ' disabled' : '')}>Choose import file…<input type="file" accept=".json,application/json" class="vh" disabled=${!!busy} onChange=${pick} /></label></div>
+    ${err && html`<div class="callout bad">${err}</div>`}
+    ${done && html`<div class=${'callout ' + (done.failed.length ? 'warn' : 'good')}>Imported ${done.confirmed} confirmed ${done.confirmed === 1 ? 'order' : 'orders'}${done.drafts ? ` and ${done.drafts} ${done.drafts === 1 ? 'draft' : 'drafts'} (open them to fill in what’s missing)` : ''}.${done.failed.length ? html`<ul>${done.failed.map(f => html`<li>${f}</li>`)}</ul>` : ''}</div>`}
+    ${rows && html`
+      <div class=${'callout ' + (Store.mode === 'demo' ? 'info' : 'warn')}>${Store.mode === 'demo' ? 'Practice mode is on: these will be saved as practice orders, and “Refresh practice orders” will remove them.' : 'Live mode: these will be saved as real orders.'}</div>
+      <div class="tscroll"><table class="ptable imptable">
+        <thead><tr><th></th><th>Pickup</th><th>Customer</th><th>Items</th><th>Price</th><th>Saves as</th></tr></thead>
+        <tbody>${rows.map((r, k) => { const T = formTotals(r.form); return html`<tr key=${k} class=${r.on ? '' : 'off'}>
+          <td><input type="checkbox" checked=${r.on} onChange=${e => { const c = rows.slice(); c[k] = { ...r, on: e.target.checked }; setRows(c); }} aria-label="Include this order" /></td>
+          <td>${r.form.pickupDate ? fmtDateMed(r.form.pickupDate) : '—'} ${r.form.pickupTime ? fmtTime(r.form.pickupTime) : ''}</td>
+          <td><b>${r.form.customer.name || '(no name)'}</b><br /><span class="small muted">${r.form.customer.phone ? fmtPhone(r.form.customer.phone) : 'no phone'}</span>${r.dup ? html`<br /><span class="tag ex">already in the site?</span>` : ''}</td>
+          <td class="small">${r.form.items.map(it => html`<div>${specBrief(specFromFormItem(it))}</div>`)}${r.warn.map(w => html`<div class="warntxt">${w}</div>`)}</td>
+          <td>${fmtMoney(T.totalCents)}</td>
+          <td>${r.missing.length ? html`<span class="tag draft">Draft</span><div class="small muted">Missing: ${r.missing.slice(0, 3).join('; ')}${r.missing.length > 3 ? '…' : ''}</div>` : html`<span class="tag coll">Confirmed</span>`}</td>
+        </tr>`; })}</tbody></table></div>
+      <div class="inline"><button class="btn primary" disabled=${!!busy || !n} onClick=${go}>${busy || `Import ${n} ${n === 1 ? 'order' : 'orders'}${nd ? ` (${nd} as drafts)` : ''}`}</button>
+        <button class="btn ghost" disabled=${!!busy} onClick=${() => setRows(null)}>Cancel</button></div>`}
   </div></section>`;
 }

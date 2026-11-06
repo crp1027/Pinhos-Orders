@@ -478,3 +478,67 @@ function describeChanges(cur, next) {
   }
   return out.slice(0, 8).join('; ');
 }
+
+/* ----- import orders from a JSON file (format "pinhos-orders-import", v1) -----
+   Each order becomes a normal order form and is saved through saveOrderForm, so numbering, pricing and history
+   work exactly as if staff typed it in. Complete orders are confirmed; anything missing is saved as a draft. */
+const IMPORT_TYPES = ['standard', 'tier', 'single', 'cupcakecake', 'cupcakes', 'other'];
+function importMatch(list, v) {
+  if (v === null || v === undefined || v === '') return '';
+  const t = String(v).trim(); const low = t.toLowerCase();
+  const hit = (list || []).find(x => (x.label || x).toLowerCase() === low);
+  return hit ? (hit.label || hit) : t;
+}
+function importToForm(o, k) {
+  const warn = [];
+  const s = v => (v === null || v === undefined) ? '' : String(v).trim();
+  const f = blankForm();
+  f.customer.name = s(o.customer && o.customer.name);
+  f.customer.phone = s(o.customer && o.customer.phone);
+  f.takenBy = s(o.takenBy) || 'Paper import';
+  f.pickupDate = /^\d{4}-\d{2}-\d{2}$/.test(s(o.pickupDate)) ? s(o.pickupDate) : '';
+  f.pickupTime = /^\d{1,2}:\d{2}$/.test(s(o.pickupTime)) ? s(o.pickupTime).padStart(5, '0') : '';
+  f.allowClosed = true;
+  if (o.deposit !== null && o.deposit !== undefined && +o.deposit > 0) { f.deposit.amount = String(o.deposit); f.deposit.method = 'other'; f.deposit.ref = 'From paper order'; }
+  const m = menu(); const src = s(o.source) || `order ${k + 1}`;
+  f.items = (Array.isArray(o.items) && o.items.length ? o.items : [{}]).map((x, i) => {
+    const it = blankItem(i);
+    const tk = IMPORT_TYPES.includes(x.type) ? x.type : 'other';
+    it.typeKey = tk;
+    if (tk === 'other') it.typeOther = (s(x.size) || s(x.notes) || 'Paper order item').slice(0, 60);
+    if (['standard', 'tier', 'single'].includes(tk)) {
+      const row = sizeOptions(tk).find(r => r.label.toLowerCase() === s(x.size).toLowerCase());
+      if (row) { it.sizeKey = row.key; if (tk === 'tier') it.tiers = row.tiers.map(sz => ({ ...blankTier(sz), flavor: importMatch(m.flavors, x.flavor), filling: importMatch(m.fillings, x.filling) })); }
+      else if (s(x.size)) warn.push(`Item ${suffixFor(i)}: size “${s(x.size)}” isn’t on the menu`);
+    }
+    if (x.qty !== null && x.qty !== undefined) it.qty = String(x.qty);
+    it.flavor = importMatch(m.flavors, x.flavor);
+    it.filling = importMatch(m.fillings, x.filling);
+    if (s(x.filling2)) { it.filling2 = importMatch(m.fillings, x.filling2); it.fillMode = 'half'; }
+    it.icing = importMatch(m.icings, x.icing);
+    for (const [lab, val, list] of [['flavor', it.flavor, m.flavors], ['filling', it.filling, m.fillings], ['icing', it.icing, m.icings]])
+      if (val && !(list || []).some(z => (z.label || z) === val)) warn.push(`Item ${suffixFor(i)}: ${lab} “${val}” isn’t on the menu`);
+    if (s(x.inscription)) { it.inscription = s(x.inscription); it.inscriptionColor = s(x.inscriptionColor); } else it.noInscription = true;
+    it.decoration = s(x.decoration);
+    it.extras = (Array.isArray(x.extras) ? x.extras : []).filter(e => e && s(e.desc)).map(e => ({ id: uid(), desc: s(e.desc), amount: e.price === null || e.price === undefined ? '' : String(e.price), isNew: true }));
+    const notes = [s(x.notes), i === 0 ? s(o.notes) : ''].filter(Boolean).join(' · ');
+    it.newProd = `From paper order (${src})${notes ? ': ' + notes : ''}`;
+    // keep the price that was written on the paper slip
+    if (x.writtenPrice !== null && x.writtenPrice !== undefined && !Number.isNaN(+x.writtenPrice)) {
+      const calc = formItemPrice(it).calc.calcCents; const paper = Math.round(+x.writtenPrice * 100);
+      if (calc === null || calc !== paper) { it.override = { on: true, amount: String(x.writtenPrice), reason: `Price written on the paper order${calc !== null ? ` (site calculated ${fmtMoney(calc)})` : ''}` }; if (calc !== null) warn.push(`Item ${suffixFor(i)}: paper price ${fmtMoney(paper)} kept (site calculated ${fmtMoney(calc)})`); }
+    }
+    return it;
+  });
+  return { form: f, warn, missing: missingForConfirm(f), src };
+}
+function parseImportFile(text) {
+  let d; try { d = JSON.parse(text); } catch { throw { message: 'That file isn’t valid JSON. Use the .json file the other chat made.' }; }
+  if (!d || d.format !== 'pinhos-orders-import' || !Array.isArray(d.orders)) throw { message: 'That file isn’t a Pinho’s order import file (it needs "format": "pinhos-orders-import" and an "orders" list).' };
+  return d.orders.map((o, k) => {
+    const r = importToForm(o || {}, k);
+    const name = r.form.customer.name.toLowerCase();
+    r.dup = [...Store.orders.values()].some(x => !x.archived && (x.customer?.name || '').trim().toLowerCase() === name && x.pickupDate === r.form.pickupDate && x.pickupTime === r.form.pickupTime && x.booking !== 'canceled');
+    return r;
+  });
+}
