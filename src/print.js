@@ -258,19 +258,17 @@ function rcLastRevision(o) {
 function rcWork(o, it) {
   const tk = typeKeyOf(it); const its = itemsOf(o); const idx = its.findIndex(x => x.id === it.id) + 1;
   const box = (label, val, cls = '', span = '') => `<div class="rw-c ${span ? 'rw-' + span : ''}"><div class="rw-l">${esc(label)}</div><div class="rw-v ${cls ? 'rw-' + cls : ''}">${val}</div></div>`;
-  const bar = t => `<div class="rw-hb">${esc(t)}</div>`;
   const filling = (x, prefix = '') => {
     const mode = fillModeOf(x);
     if (mode === 'half') return `<div class="rw-c"><div class="rw-l">${esc(prefix)}Split filling</div><div class="rw-sub">Same split in every filling layer</div><div class="rw-halves"><div class="rw-hbx"><div class="rw-l">Half 1</div><div class="rw-v">${esc(x.filling || '—')}</div></div><div class="rw-hbx"><div class="rw-l">Half 2</div><div class="rw-v">${esc(x.filling2 || '—')}</div></div></div></div>`;
-    if (mode === 'layer') return box(`${prefix}Filling · layer 1`, esc(x.filling || '—'), '', 's3') + box(`${prefix}Filling · layer 2`, esc(x.filling2 || '—'), '', 's3');
+    if (mode === 'layer') return box(`${prefix}Layer 1`, esc(x.filling || '—'), '', 's3') + box(`${prefix}Layer 2`, esc(x.filling2 || '—'), '', 's3');
     return box(`${prefix}Filling`, esc(x.filling || (tk === 'single' ? 'None (single layer)' : '—')));
   };
   const revised = !!(it.printedHash && it.printedHash !== slipHash(o, it));
   const imgs = mapList(it.images); const A = it.addons || {}; const ex = extrasOf(it).filter(x => (x.desc || '').trim());
-  const tags = [it.frozen && 'FROZEN', it.plan && 'ADVANCE WORK', (imgs.length || A.animated || A.portrait) && 'PHOTO', ex.length && 'EXTRAS', revised && 'REVISED', o.demo && 'PRACTICE', o.booking === 'draft' && 'DRAFT'].filter(Boolean);
   const ss = rcSizeShape(it); const gs = groupsOf(it);
-  // FILL & ICE
-  let cake = bar('Fill & ice');
+  // 2. FILL & ICE
+  let cake = `<div class="rw-hb">Fill &amp; ice</div>`;
   if (tk === 'other') cake += box('Item', esc(it.type || 'Custom item') + (it.qty ? ` · ${esc(it.qty)}` : ''), 'xl');
   else cake += box('Size', esc(ss.size), ss.size.length > 9 ? '' : 'xl', 's3') + box('Shape', esc(ss.shape || '—'), ss.shape.length > 14 ? 'm' : 'xl', 's3');
   if (tk === 'tier' && (it.tiers || []).length) {
@@ -285,41 +283,43 @@ function rcWork(o, it) {
   const prod = [];
   if (it.attention && it.attention.on) prod.push('NEEDS ATTENTION: ' + it.attention.reason);
   if (it.plan) prod.push(`Early work: ${STAGES[it.plan.milestone]} on ${fmtDateMed(it.plan.date)}`);
+  if (it.frozen) prod.push(`Frozen${it.storage ? ' · ' + it.storage : ''}`);
   for (const n of mapList(it.notes).filter(n => n.kind !== 'cust')) prod.push(n.text);
-  if (prod.length) cake += box('Production notes', prod.map(esc).join('<br>'), 'm');
-  // DECORATE / WRITING
-  const writing = bar('Decorate / writing') + (it.noInscription
-    ? `<div class="rw-c"><div class="rw-noinsc">NO INSCRIPTION</div></div>`
-    : `<div class="rw-c"><div class="rw-l">Exact inscription</div><div class="rw-insc">${it.inscription ? esc(it.inscription) : '<i>Not entered yet</i>'}</div></div>` + (it.inscriptionColor ? box('Text color', esc(it.inscriptionColor)) : ''));
-  // DECORATE / DESIGN
+  if (prod.length) cake += box('Production notes', prod.map(esc).join('<br>'), 'pn');
+  // 3. DECORATE / WRITING (reading style)
+  const field = (label, val) => `<div class="rw-f"><div class="rw-l">${esc(label)}</div><div class="rw-fv">${val}</div></div>`;
+  const writing = `<div class="rw-rb rw-wr"><div class="rw-rh">Decorate / writing</div>` + (it.noInscription
+    ? `<div class="rw-fv">No inscription</div>`
+    : field('Inscription', it.inscription ? esc(it.inscription) : '<i>Not entered yet</i>') + (it.inscriptionColor ? `<div class="rw-f rw-inl"><span class="rw-l">Text color:</span> <span class="rw-fv">${esc(it.inscriptionColor)}</span></div>` : '')) + `</div>`;
+  // 4. DECORATE / DESIGN
   const pic = [A.animated && 'Animated picture', A.portrait && 'Personal portrait', ...imgs.map(im => IMG_PURPOSE[im.purpose] || 'Picture (purpose not set)')].filter(Boolean);
   const theme = [it.decoration, it.colors && `Colors: ${it.colors}`, A.themeOn && !it.decoration && 'Theme decoration', A.figuresOn && 'Figures'].filter(Boolean);
   const reqs = [it.requests, ...mapList(it.notes).filter(n => n.kind === 'cust').map(n => n.text)].filter(Boolean);
   let design = '';
-  if (pic.length) design += box('Picture', esc([...new Set(pic)].join('; ')), 'm');
-  if (it.picturePhone) design += box('Picture contact', esc(fmtPhone(it.picturePhone)), 'm');
-  if (imgs.length) design += box('Photo file', esc(imgs.map(im => im.name || 'photo').join(', ')) + ' · in the app', 'm');
-  if (theme.length) design += box('Theme', theme.map(esc).join('<br>'), 'm');
-  if (ex.length) design += box('Extras', ex.map(x => esc(x.desc)).join('<br>'), 'm');
-  if (reqs.length) design += box('Customer requests', reqs.map(esc).join('<br>'), 'm');
+  if (pic.length) design += field('Picture', esc([...new Set(pic)].join('; ')));
+  if (it.picturePhone) design += field('Picture contact', esc(fmtPhone(it.picturePhone)));
+  if (imgs.length) design += field('Photo file', esc(imgs.map(im => im.name || 'photo').join(', ')) + ' · in the app');
+  if (theme.length) design += field('Theme', theme.map(esc).join('<br>'));
+  if (ex.length) design += field('Extras', ex.map(x => esc(x.desc)).join('<br>'));
+  if (reqs.length) design += field('Customer requests', reqs.map(esc).join('<br>'));
+  // 6. footer
   const rev = revised ? rcLastRevision(o) : null;
+  const tot = o.totalCents ?? null, paid = paidCents(o), bal = balanceCents(o);
+  const money = tot === null ? (paid ? `Paid ${fmtMoney(paid)} · total not set` : 'Total not set')
+    : bal !== null && bal <= 0 ? `Total ${fmtMoney(tot)} · Paid in full` : `Total ${fmtMoney(tot)} · Paid ${fmtMoney(paid)} · Balance ${fmtMoney(bal)}`;
+  const marks = [o.demo && 'PRACTICE ORDER', o.booking === 'draft' && 'DRAFT — not confirmed'].filter(Boolean);
   return `<div class="rcw">
-    <div class="rw-g">${bar('Pickup')}<div class="rw-c"><div class="rw-day">${esc(fmtDateMed(o.pickupDate).replace(/^(\w+) /, '$1, '))}</div><div class="rw-time">${esc(fmtTime(o.pickupTime))}</div></div>
-      <div class="rw-c rw-s4"><div class="rw-l">Order</div><div class="rw-num">${esc(itemLabel(o, it))}</div></div>
-      <div class="rw-c rw-s2"><div class="rw-l">Item</div><div class="rw-of">${idx} of ${its.length}</div></div></div>
-    ${tags.length ? `<div class="rw-tags">${tags.map(t => `<div class="rw-tag">${t}</div>`).join('')}</div>` : ''}
-    <div class="rw-g"><div class="rw-c"><div class="rw-l">Customer</div><div class="rw-v">${esc(o.customer?.name || '(no name)')}</div><div class="rw-phone">${esc(fmtPhone(o.customer?.phone) || 'no phone')}</div></div>
-      ${o.takenBy ? `<div class="rw-c rw-row"><div class="rw-l">Order taken by</div><div class="rw-v">${esc(o.takenBy)}</div></div>` : ''}</div>
-    <div class="rw-g">${cake}</div>
-    <div class="rw-g">${writing}</div>
-    ${design ? `<div class="rw-g">${bar('Decorate / design')}${design}</div>` : ''}
     <div class="rw-g">
-      <div class="rw-c rw-s2 rw-ck"><div class="rw-bx"></div><div class="rw-l">Filled</div></div><div class="rw-c rw-s2 rw-ck"><div class="rw-bx"></div><div class="rw-l">Iced</div></div><div class="rw-c rw-s2 rw-ck"><div class="rw-bx"></div><div class="rw-l">Decorated</div></div>
-      <div class="rw-c"><div class="rw-l">Notes</div><div class="rw-notes"></div></div>
-      <div class="rw-c rw-s4"><div class="rw-l">Stored</div><div class="rw-wl">${it.storage ? esc(it.storage) : ''}</div></div>
-      <div class="rw-c rw-s2 rw-ck rw-big"><div class="rw-bx"></div><div class="rw-l">Ready</div></div>
+      <div class="rw-c rw-s3"><div class="rw-l">Pickup</div><div class="rw-day">${esc(fmtDateMed(o.pickupDate).replace(/^(\w+) /, '$1, '))}</div><div class="rw-time">${esc(fmtTime(o.pickupTime))}</div></div>
+      <div class="rw-c rw-s3"><div class="rw-l">Order</div><div class="rw-num">${esc(itemLabel(o, it))}</div><div class="rw-of">${idx} of ${its.length}</div></div>
+      <div class="rw-c rw-cust"><div class="rw-who"><div class="rw-name">${esc(o.customer?.name || '(no name)')}</div><div class="rw-phone">${esc(fmtPhone(o.customer?.phone) || 'no phone')}</div></div>${o.takenBy ? `<div class="rw-by">Taken by <b>${esc(o.takenBy)}</b></div>` : ''}</div>
     </div>
-    <div class="rw-foot">${rev ? `<div class="rw-rv">REV ${esc(o.editRev || 2)} · ${esc(fmtStamp(rev.at))}</div>${rev.changed ? `<div class="rw-ch">Changed: ${esc(rev.changed)}</div>` : ''}` : ''}<div class="rw-pr">Printed ${esc(fmtStamp(Date.now()))}</div></div>
+    <div class="rw-g">${cake}</div>
+    ${writing}
+    ${design ? `<div class="rw-rb rw-dz"><div class="rw-rh">Decorate / design</div>${design}</div>` : ''}
+    <div class="rw-nb"><div class="rw-l">Notes</div></div>
+    <div class="rw-foot">${rev ? `<div class="rw-rv">REV ${esc(o.editRev || 2)} · ${esc(fmtStamp(rev.at))}</div>${rev.changed ? `<div class="rw-ch">Changed: ${esc(rev.changed)}</div>` : ''}` : ''}
+      <div class="rw-mn">${esc(money)}</div>${marks.length ? `<div class="rw-mk">${marks.join(' · ')}</div>` : ''}<div class="rw-pr">Printed ${esc(fmtStamp(Date.now()))}</div></div>
   </div>`;
 }
 function rcCustomer(o) {
